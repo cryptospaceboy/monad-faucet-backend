@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Faucet Test</title>
+</head>
+<body>
+  <h1>Faucet Test</h1>
+  <a href="/auth/discord">Login with Discord</a>
+  <button id="claimBtn">Claim</button>
+  <p id="result"></p>
+
+  <script>
+    document.getElementById("claimBtn").onclick = async () => {
+      const res = await fetch("/claim", { method: "POST", credentials: "include" });
+      const data = await res.json();
+      document.getElementById("result").textContent = JSON.stringify(data);
+    };
+  </script>
+</body>
+</html>
