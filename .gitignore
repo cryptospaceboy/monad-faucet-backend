@@ -1,5 +1,4 @@
 .vercel
-server.js
 node_modules
 txt.file
 .env
