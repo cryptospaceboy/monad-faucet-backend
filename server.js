@@ -8,13 +8,13 @@ app.use(express.json());
 
 // ---------- CORS ----------
 const FRONTEND_URLS = [
-  "http://localhost:5173",
-  "https://monad-faucet-vert-three.vercel.app"
+  "https://monad-faucet-vert-three.vercel.app",
+  "http://localhost:5173"
 ];
 
 app.use(cors({
   origin: function(origin, callback) {
-    if (!origin) return callback(null, true);
+    if (!origin) return callback(null, true); // Allow Postman or mobile apps with no origin
     if (FRONTEND_URLS.indexOf(origin) === -1) {
       return callback(new Error("The CORS policy for this site does not allow access from the specified Origin."), false);
     }
@@ -25,7 +25,7 @@ app.use(cors({
 
 // ---------- Faucet contract config ----------
 const FAUCET_CONTRACT_ADDRESS = process.env.FAUCET_CONTRACT_ADDRESS;
-const FAUCET_PRIVATE_KEY = process.env.FAUCET_PRIVATE_KEY; 
+const FAUCET_PRIVATE_KEY = process.env.FAUCET_PRIVATE_KEY;
 const PROVIDER_URL = process.env.PROVIDER_URL;
 
 const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
@@ -42,7 +42,6 @@ app.post('/cooldown', async (req, res) => {
     const { address } = req.body;
     if (!address) return res.status(400).json({ error: 'Address required' });
 
-    console.log("Cooldown check for:", address);
     const nextClaim = await contract.nextClaimTime(address);
     res.json({ nextClaim: nextClaim.toNumber() });
   } catch (err) {
@@ -57,19 +56,14 @@ app.post('/claim', async (req, res) => {
     const { address } = req.body;
     if (!address) return res.status(400).json({ success: false, error: 'Address required' });
 
-    console.log("Claim request for:", address);
-
     const tx = await contract.claim(address);
-    console.log("Transaction sent, hash:", tx.hash);
-
     await tx.wait();
-    console.log("Transaction confirmed:", tx.hash);
 
     res.json({ success: true, txHash: tx.hash });
   } catch (err) {
     console.error("Claim error:", err);
 
-    // Safe error message
+    // Safe error handling
     let errorMessage = "Unknown error";
     if (err) {
       if (err.reason) errorMessage = err.reason;
