@@ -6,22 +6,8 @@ const { ethers } = require('ethers');
 const app = express();
 app.use(express.json());
 
-// ---------- CORS ----------
-const FRONTEND_URLS = [
-  "https://monad-faucet-vert-three.vercel.app",
-  "http://localhost:5173"
-];
-
-app.use(cors({
-  origin: function(origin, callback) {
-    if (!origin) return callback(null, true); // Allow Postman or mobile apps with no origin
-    if (FRONTEND_URLS.indexOf(origin) === -1) {
-      return callback(new Error("The CORS policy for this site does not allow access from the specified Origin."), false);
-    }
-    return callback(null, true);
-  },
-  credentials: true
-}));
+// ---------- CORS (allow all for testing) ----------
+app.use(cors());
 
 // ---------- Faucet contract config ----------
 const FAUCET_CONTRACT_ADDRESS = process.env.FAUCET_CONTRACT_ADDRESS;
@@ -36,46 +22,63 @@ const FAUCET_ABI = [
 ];
 const contract = new ethers.Contract(FAUCET_CONTRACT_ADDRESS, FAUCET_ABI, wallet);
 
-// ---------- Check cooldown ----------
-app.post('/cooldown', async (req, res) => {
-  try {
-    const { address } = req.body;
-    if (!address) return res.status(400).json({ error: 'Address required' });
+// ---------- Helper to send responses ----------
+function sendRes(res, success, message, extra = {}) {
+  return res.json({ success, message, ...extra });
+}
 
-    const nextClaim = await contract.nextClaimTime(address);
-    res.json({ nextClaim: nextClaim.toNumber() });
-  } catch (err) {
-    console.error("Cooldown error:", err);
-    res.status(500).json({ error: (err && err.message) ? err.message : "Unknown error" });
-  }
-});
-
-// ---------- Claim endpoint ----------
+// ---------- Claim endpoint with checks ----------
 app.post('/claim', async (req, res) => {
   try {
     const { address } = req.body;
-    if (!address) return res.status(400).json({ success: false, error: 'Address required' });
+    if (!address) return sendRes(res, false, '⚠️ Address is required');
 
+    // --- Wallet age check ---
+    const history = await provider.getHistory(address);
+    if (history.length === 0) {
+      return sendRes(res, false, "⚠️ Wallet has no transactions yet");
+    }
+
+    const firstTx = history[0];
+    const firstBlock = await provider.getBlock(firstTx.blockNumber);
+    const walletAgeDays = (Date.now() / 1000 - firstBlock.timestamp) / (60 * 60 * 24);
+
+    if (walletAgeDays < 10) {
+      return sendRes(res, false, "⏳ Wallet must be at least 10 days old");
+    }
+
+    // --- Transaction count check ---
+    if (history.length < 10) {
+      return sendRes(res, false, "📉 Wallet must have at least 10 transactions");
+    }
+
+    // --- Call faucet contract ---
     const tx = await contract.claim(address);
     await tx.wait();
 
-    res.json({ success: true, txHash: tx.hash });
+    return sendRes(res, true, "✅ Claim successful", { txHash: tx.hash });
   } catch (err) {
     console.error("Claim error:", err);
+    return sendRes(res, false, "❌ Something went wrong, try again later");
+  }
+});
 
-    // Safe error handling
-    let errorMessage = "Unknown error";
-    if (err) {
-      if (err.reason) errorMessage = err.reason;
-      else if (err.message) errorMessage = err.message;
-    }
+// ---------- Cooldown endpoint ----------
+app.post('/cooldown', async (req, res) => {
+  try {
+    const { address } = req.body;
+    if (!address) return sendRes(res, false, '⚠️ Address is required');
 
-    res.status(500).json({ success: false, error: errorMessage });
+    const nextClaim = await contract.nextClaimTime(address);
+    return sendRes(res, true, "✅ Cooldown fetched", { nextClaim: nextClaim.toNumber() });
+  } catch (err) {
+    console.error("Cooldown error:", err);
+    return sendRes(res, false, "❌ Could not fetch cooldown");
   }
 });
 
 // ---------- Start server ----------
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  console.log(🚀 Faucet backend running on port ${PORT});
+  console.log(`🚀 Faucet backend running on port ${PORT}`);
 });
