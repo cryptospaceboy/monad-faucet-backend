@@ -1,84 +1,96 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const { ethers } = require('ethers');
+// server.js
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import { ethers } from "ethers";
+
+dotenv.config();
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
-// ---------- CORS (allow all for testing) ----------
-app.use(cors());
+// ====== ENV CONFIG ======
+const PORT = process.env.PORT || 5000;
+const PROVIDER_URL = process.env.RPC_URL;   // e.g. Ankr/Alchemy/Infura or local node
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+const CLAIM_AMOUNT = ethers.parseEther("0.05"); // 0.05 MON
 
-// ---------- Faucet contract config ----------
-const FAUCET_CONTRACT_ADDRESS = process.env.FAUCET_CONTRACT_ADDRESS;
-const FAUCET_PRIVATE_KEY = process.env.FAUCET_PRIVATE_KEY;
-const PROVIDER_URL = process.env.PROVIDER_URL;
-
+// ====== ETHERS SETUP ======
 const provider = new ethers.JsonRpcProvider(PROVIDER_URL);
-const wallet = new ethers.Wallet(FAUCET_PRIVATE_KEY, provider);
-const FAUCET_ABI = [
-  "function claim(address _to) external",
-  "function nextClaimTime(address _user) view returns(uint256)"
+const wallet = new ethers.Wallet(PRIVATE_KEY, provider);
+
+// faucet contract ABI (must include the claim function)
+const abi = [
+  "function claim(address to, uint256 amount) public returns (bool)"
 ];
-const contract = new ethers.Contract(FAUCET_CONTRACT_ADDRESS, FAUCET_ABI, wallet);
+const contract = new ethers.Contract(CONTRACT_ADDRESS, abi, wallet);
 
-// ---------- Helper to send responses ----------
-function sendRes(res, success, message, extra = {}) {
-  return res.json({ success, message, ...extra });
-}
+// ====== COOLDOWN STORE ======
+// Simple in-memory cooldown store
+// In production, use Redis or DB
+const cooldowns = {};
+const COOLDOWN_SECONDS = 24 * 60 * 60; // 24h
 
-// ---------- Claim endpoint with checks ----------
-app.post('/claim', async (req, res) => {
+// ====== CHECK COOLDOWN ======
+app.post("/cooldown", (req, res) => {
+  const { address } = req.body;
+  if (!address) return res.status(400).json({ error: "Address required" });
+
+  const nextClaim = cooldowns[address?.toLowerCase()] || 0;
+  res.json({ nextClaim });
+});
+
+// ====== CLAIM ROUTE ======
+app.post("/claim", async (req, res) => {
   try {
     const { address } = req.body;
-    if (!address) return sendRes(res, false, '⚠️ Address is required');
+    if (!address) return res.status(400).json({ error: "Address required" });
 
-    // --- Wallet age check ---
-    const history = await provider.getHistory(address);
-    if (history.length === 0) {
-      return sendRes(res, false, "⚠️ Wallet has no transactions yet");
+    const userAddr = address.toLowerCase();
+
+    // --- Cooldown check
+    const now = Math.floor(Date.now() / 1000);
+    const nextClaim = cooldowns[userAddr] || 0;
+    if (now < nextClaim) {
+      return res.json({
+        success: false,
+        error: "Cooldown active. Try again later.",
+        nextClaim,
+      });
     }
 
-    const firstTx = history[0];
-    const firstBlock = await provider.getBlock(firstTx.blockNumber);
-    const walletAgeDays = (Date.now() / 1000 - firstBlock.timestamp) / (60 * 60 * 24);
+    // --- Wallet safety checks
+    const creationTxCount = await provider.getTransactionCount(userAddr, "earliest");
+    const txCount = await provider.getTransactionCount(userAddr, "latest");
 
-    if (walletAgeDays < 10) {
-      return sendRes(res, false, "⏳ Wallet must be at least 10 days old");
+    if (creationTxCount === 0 && txCount < 3) {
+      return res.json({
+        success: false,
+        error: "Wallet looks too new / inactive. Use a more established wallet.",
+      });
     }
 
-    // --- Transaction count check ---
-    if (history.length < 10) {
-      return sendRes(res, false, "📉 Wallet must have at least 10 transactions");
-    }
-
-    // --- Call faucet contract ---
-    const tx = await contract.claim(address);
+    // --- Send claim tx
+    const tx = await contract.claim(userAddr, CLAIM_AMOUNT);
     await tx.wait();
 
-    return sendRes(res, true, "✅ Claim successful", { txHash: tx.hash });
+    // --- Update cooldown
+    cooldowns[userAddr] = now + COOLDOWN_SECONDS;
+
+    res.json({
+      success: true,
+      txHash: tx.hash,
+      nextClaim: cooldowns[userAddr],
+    });
   } catch (err) {
     console.error("Claim error:", err);
-    return sendRes(res, false, "❌ Something went wrong, try again later");
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// ---------- Cooldown endpoint ----------
-app.post('/cooldown', async (req, res) => {
-  try {
-    const { address } = req.body;
-    if (!address) return sendRes(res, false, '⚠️ Address is required');
-
-    const nextClaim = await contract.nextClaimTime(address);
-    return sendRes(res, true, "✅ Cooldown fetched", { nextClaim: nextClaim.toNumber() });
-  } catch (err) {
-    console.error("Cooldown error:", err);
-    return sendRes(res, false, "❌ Could not fetch cooldown");
-  }
-});
-
-// ---------- Start server ----------
-const PORT = process.env.PORT || 4000;
+// ====== START SERVER ======
 app.listen(PORT, () => {
   console.log(`🚀 Faucet backend running on port ${PORT}`);
 });
